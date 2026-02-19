@@ -1,0 +1,6 @@
+requests
+pytz
+gspread
+google-auth
+google-auth-oauthlib
+

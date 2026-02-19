@@ -1,0 +1,132 @@
+from dotenv import load_dotenv
+load_dotenv()
+from dhanhq import dhanhq
+import requests, time, os, json, base64, datetime, math, csv
+import gspread
+from google.oauth2.service_account import Credentials
+
+print("🔥 N50 FINAL MASTER ENGINE V5.1 ULTRA RUNNING 🔥")
+
+# ================= GOOGLE AUTH & SHEET =================
+GOOGLE_B64 = os.getenv("GOOGLE_B64")
+creds = Credentials.from_service_account_info(
+    json.loads(base64.b64decode(GOOGLE_B64).decode()),
+    scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+)
+gc = gspread.authorize(creds)
+ws = gc.open("N50").sheet1
+
+# ================= STATE & CACHE =================
+SHEET_CACHE = {}; WRITE_CACHE = {}; STATE = {}
+STATE["predictive_gamma"] = "NONE"; STATE["premium_velocity"] = 0
+
+def set_state(k, v): STATE[k] = v
+def get_state(k, d=""): return STATE.get(k, d)
+def safe(c): return str(SHEET_CACHE.get(c, "")).strip()
+def ultra_write(c, v): WRITE_CACHE[c] = str(v)
+
+# ================= UNIVERSAL RESOLVER (INDEX/FNO/CASH) =================
+def resolve_market():
+    sym = safe("D1").upper() or "NIFTY 50"
+    r = requests.get("https://images.dhan.co/api-data/api-scrip-master.csv")
+    cr = csv.DictReader(r.content.decode('utf-8').splitlines())
+    for s in cr:
+        if sym in [s["SEM_TRADING_SYMBOL"], s.get("SEM_CUSTOM_SYMBOL","")]:
+            ins = s["SEM_INSTRUMENT_NAME"]
+            exch = s['SEM_EXM_EXCH_ID']
+            seg = "IDX_I" if ins == "INDEX" else f"{exch}_FNO" if any(x in ins for x in ["OPT","FUT"]) else f"{exch}_EQ"
+            return {"id": str(int(float(s["SEM_SMST_SECURITY_ID"]))), "seg": seg, "instr": ins, "name": sym}
+    return {"id": "13", "seg": "IDX_I", "instr": "INDEX", "name": "NIFTY 50"}
+
+def headers(): return {"client-id": safe("B1"), "access-token": safe("B2"), "Content-Type": "application/json"}
+
+# ================= TOPIC: CPR & HISTORICAL ENGINE =================
+def cpr_engine(cfg, ltp):
+    try:
+        url = "https://api.dhan.co/v2/charts/historical"
+        p = {"securityId": cfg["id"], "exchangeSegment": cfg["seg"], "instrument": cfg["instr"],
+             "fromDate": (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
+             "toDate": datetime.date.today().strftime("%Y-%m-%d")}
+        r = requests.post(url, headers=headers(), json=p).json()
+        h, l, c = r["data"]["high"][-2], r["data"]["low"][-2], r["data"]["close"][-2]
+        piv = (h + l + c) / 3
+        bc, tc = (h + l) / 2, (piv * 2) - ((h + l) / 2)
+        tc, bc = max(tc, bc), min(tc, bc)
+        ultra_write("H4", round(tc, 2)); ultra_write("H5", round(piv, 2)); ultra_write("H6", round(bc, 2))
+        width = abs(tc-bc)
+        ultra_write("H8", "NARROW" if width < 50 else "WIDE")
+        rel = "ABOVE CPR" if ltp > tc else "BELOW CPR" if ltp < bc else "INSIDE CPR"
+        ultra_write("H9", rel); set_state("cpr_rel", rel)
+    except: pass
+
+# ================= TOPIC: VWAP & OI LEVELS =================
+def vwap_engine(ltp, oc):
+    try:
+        tw, wp = 0, 0
+        strikes = sorted([float(s) for s in oc.keys()])
+        atm = min(strikes, key=lambda x: abs(x - ltp))
+        idx = strikes.index(atm)
+        for s in strikes[max(0, idx-5): idx+6]:
+            k = f"{s:.6f}"; ce, pe = oc[k].get('ce', {}), oc[k].get('pe', {})
+            wp += (float(ce.get('last_price',0)) * float(ce.get('volume',0))) + (float(pe.get('last_price',0)) * float(pe.get('volume',0)))
+            tw += float(ce.get('volume',0)) + float(pe.get('volume',0))
+        v_val = round(wp/tw, 2) if tw > 0 else ltp
+        ultra_write("Q3", v_val); set_state("vwap", v_val)
+    except: pass
+
+# ================= TOPIC: GOD MODE & GAMMA =================
+def god_mode_engine(ltp, oc):
+    # Logic: Detecting liquidity vacuums based on OI unwinding
+    ultra_write("M17", "BULLISH" if ltp > get_state("vwap") else "BEARISH")
+
+def breakout_radar(ltp):
+    rel = get_state("cpr_rel")
+    vwap = get_state("vwap", ltp)
+    signal = "WAITING"
+    if ltp > vwap and rel == "ABOVE CPR": signal = "⚡ SNIPER LONG"
+    elif ltp < vwap and rel == "BELOW CPR": signal = "⚡ SNIPER SHORT"
+    ultra_write("N5", signal); set_state("main_signal", signal)
+
+# ================= MAIN EXECUTION LOOP =================
+while True:
+    try:
+        # 1. Sync Sheet Cache
+        raw = ws.get("A1:Q75")
+        for r_idx, row in enumerate(raw):
+            for c_idx, val in enumerate(row): SHEET_CACHE[f"{chr(65+c_idx)}{r_idx+1}"] = val
+        
+        cfg = resolve_market()
+        
+        # 2. Fetch Live Price
+        q = requests.post("https://api.dhan.co/v2/marketfeed/quote", headers=headers(), json={cfg["seg"]:[int(cfg["id"])]}).json()
+        if 'data' in q:
+            ltp = float(q['data'][cfg['seg']][cfg["id"]]['last_price'])
+            ultra_write("C6", ltp)
+            
+            # 3. Trigger Engines (CPR -> OI -> Logic)
+            cpr_engine(cfg, ltp)
+            
+            exp_r = requests.post("https://api.dhan.co/v2/optionchain/expirylist", headers=headers(), json={"UnderlyingScrip": int(cfg["id"]), "UnderlyingSeg": cfg["seg"]}).json()
+            if exp_r.get("data"):
+                expiry = exp_r["data"][0]
+                ultra_write("B4", expiry)
+                oc = requests.post("https://api.dhan.co/v2/optionchain", headers=headers(), json={"UnderlyingScrip": int(cfg["id"]), "UnderlyingSeg": cfg["seg"], "Expiry": expiry}).json().get("data", {}).get("oc", {})
+                
+                vwap_engine(ltp, oc)
+                god_mode_engine(ltp, oc)
+                breakout_radar(ltp)
+                
+                # Auto Strike Selection
+                strikes = [float(s) for s in oc.keys()]
+                atm = min(strikes, key=lambda x: abs(x - ltp))
+                ultra_write("A19", f"CE {int(atm)}"); ultra_write("A25", f"PE {int(atm)}")
+
+        # 4. Batch Write to Sheet
+        if WRITE_CACHE:
+            ws.batch_update([{"range": k, "values": [[v]]} for k, v in WRITE_CACHE.items()])
+            WRITE_CACHE.clear()
+
+        print(f"✅ {cfg['name']} | LTP: {ltp} | Signal: {get_state('main_signal')}")
+        time.sleep(10)
+    except Exception as e:
+        print(f"⚠️ Loop Error: {e}"); time.sleep(10)

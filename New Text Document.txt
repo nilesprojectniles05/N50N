@@ -1,0 +1,377 @@
+from dotenv import load_dotenv
+load_dotenv()
+
+import requests,time,os,json,base64,datetime,math,csv
+import gspread
+from google.oauth2.service_account import Credentials
+
+print("🔥 ULTRA UNIVERSAL ENGINE INITIALIZING 🔥")
+
+# ================= GOOGLE AUTH =================
+
+GOOGLE_B64=os.getenv("GOOGLE_B64")
+
+creds=Credentials.from_service_account_info(
+ json.loads(base64.b64decode(GOOGLE_B64).decode()),
+ scopes=[
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/drive"
+ ])
+
+gc=gspread.authorize(creds)
+ws=gc.open("N50").sheet1
+
+# ================= CACHE + STATE =================
+
+SHEET_CACHE={}
+WRITE_CACHE={}
+STATE={}
+
+def set_state(k,v): STATE[k]=v
+def get_state(k,d=None): return STATE.get(k,d)
+
+def safe(c):
+    return str(SHEET_CACHE.get(c,"")).strip()
+
+def ultra_write(c,v):
+    WRITE_CACHE[c]=v
+
+# ================= UNIVERSAL RESOLVER =================
+
+UNIVERSAL={"cfg":None,"loaded":False}
+
+def resolve_market_once():
+
+    if UNIVERSAL["loaded"]:
+        return UNIVERSAL["cfg"]
+
+    symbol=safe("D1").upper() or "NIFTY 50"
+
+    print("🔎 Resolving:",symbol)
+
+    r=requests.get("https://images.dhan.co/api-data/api-scrip-master.csv")
+    reader=csv.DictReader(r.content.decode("utf-8").splitlines())
+
+    for row in reader:
+
+        if symbol in (
+            row.get("SEM_TRADING_SYMBOL",""),
+            row.get("SEM_CUSTOM_SYMBOL","")
+        ):
+
+            sec_id=str(int(float(row["SEM_SMST_SECURITY_ID"])))
+            instr=row["SEM_INSTRUMENT_NAME"]
+            exch=row["SEM_EXM_EXCH_ID"]
+
+            if instr=="INDEX":
+                seg="IDX_I"
+            elif "OPT" in instr or "FUT" in instr:
+                seg=f"{exch}_FNO"
+            else:
+                seg=f"{exch}_EQ"
+
+            UNIVERSAL["cfg"]={
+                "symbol":symbol,
+                "id":sec_id,
+                "segment":seg,
+                "instrument":instr
+            }
+
+            UNIVERSAL["loaded"]=True
+
+            print("✅ AUTO SYMBOL:",UNIVERSAL["cfg"])
+            return UNIVERSAL["cfg"]
+
+    UNIVERSAL["cfg"]={"symbol":"NIFTY 50","id":"13","segment":"IDX_I","instrument":"INDEX"}
+    UNIVERSAL["loaded"]=True
+    return UNIVERSAL["cfg"]
+
+# ================= HEADERS =================
+
+def headers():
+    return {
+        "client-id": safe("B1"),
+        "access-token": safe("B2"),
+        "Content-Type": "application/json"
+    }
+
+# ================= CENTRAL API CACHE =================
+
+API_CACHE={
+ "cfg":None,
+ "expiry":None,
+ "oc_data":{},
+ "historical":None,
+ "intraday":None,
+ "last_expiry_fetch":0,
+ "last_oc_fetch":0,
+ "last_cpr_fetch":0,
+ "last_intraday_fetch":0
+}
+
+def throttle(last,sec):
+    return (time.time()-last)>=sec
+
+def get_cfg():
+    if API_CACHE["cfg"] is None:
+        API_CACHE["cfg"]=resolve_market_once()
+    return API_CACHE["cfg"]
+
+# ================= MARKET =================
+
+def market():
+
+    cfg=get_cfg()
+
+    r=requests.post(
+        "https://api.dhan.co/v2/marketfeed/quote",
+        headers=headers(),
+        json={cfg["segment"]:[int(cfg["id"])]}
+    ).json()
+
+    ltp=float(r["data"][cfg["segment"]][cfg["id"]]["last_price"])
+
+    return ltp,15
+
+# ================= HISTORICAL CPR CACHE (ULTRA SAFE) =================
+
+def get_historical():
+
+    cfg = get_cfg()
+
+    # ---- use cache if fresh ----
+    if API_CACHE["historical"] and not throttle(API_CACHE["last_cpr_fetch"],300):
+        return API_CACHE["historical"]
+
+    try:
+
+        r = requests.post(
+            "https://api.dhan.co/v2/charts/historical",
+            headers=headers(),
+            json={
+                "securityId":cfg["id"],
+                "exchangeSegment":cfg["segment"],
+                "instrument":cfg["instrument"],
+                "fromDate":(datetime.date.today()-datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
+                "toDate":datetime.date.today().strftime("%Y-%m-%d")
+            }
+        ).json()
+
+        API_CACHE["historical"] = r
+        API_CACHE["last_cpr_fetch"] = time.time()
+
+        print("✅ CPR REFRESH")
+
+        return r
+
+    except Exception as e:
+
+        print("CPR HIST API ERROR:", e)
+        return {}
+
+
+# ================= CPR ENGINE (ULTRA SAFE) =================
+
+def cpr_engine(ltp):
+
+    hist = get_historical()
+    print("HIST RESPONSE:", hist)
+
+    if not hist:
+        print("CPR ERROR: empty historical data")
+        return
+
+    # ----- SAFE PARSE FOR MULTIPLE DHAN FORMATS -----
+
+    highs = []
+    lows = []
+    closes = []
+
+    # format 1 (direct keys)
+    if "high" in hist:
+        highs = hist.get("high",[])
+        lows  = hist.get("low",[])
+        closes= hist.get("close",[])
+
+    # format 2 (wrapped inside data)
+    elif "data" in hist:
+        data = hist.get("data",{})
+        highs = data.get("high",[])
+        lows  = data.get("low",[])
+        closes= data.get("close",[])
+
+    else:
+        print("CPR HIST STRUCTURE UNKNOWN:", hist)
+        return
+
+    # ----- VERIFY DATA EXISTS -----
+    if len(highs)<2 or len(lows)<2 or len(closes)<2:
+        print("CPR HIST INSUFFICIENT DATA")
+        return
+
+    H = highs[-2]
+    L = lows[-2]
+    C = closes[-2]
+
+    pivot = (H+L+C)/3
+    bc = (H+L)/2
+    tc = pivot*2 - bc
+
+    tc,bc = max(tc,bc),min(tc,bc)
+
+    ultra_write("H4", round(tc,2))
+    ultra_write("H5", round(pivot,2))
+    ultra_write("H6", round(bc,2))
+
+
+# ================= EXPIRY =================
+
+def get_expiry():
+
+    cfg=get_cfg()
+
+    if API_CACHE["expiry"] and not throttle(API_CACHE["last_expiry_fetch"],3600):
+        return API_CACHE["expiry"]
+
+    r=requests.post(
+        "https://api.dhan.co/v2/optionchain/expirylist",
+        headers=headers(),
+        json={
+            "UnderlyingScrip":int(cfg["id"]),
+            "UnderlyingSeg":cfg["segment"]
+        }).json()
+
+    exp=r.get("data",[])
+
+    if exp:
+        API_CACHE["expiry"]=exp[0]
+        API_CACHE["last_expiry_fetch"]=time.time()
+
+    return API_CACHE["expiry"]
+
+# ================= OPTIONCHAIN =================
+
+def get_optionchain():
+
+    cfg=get_cfg()
+
+    if API_CACHE["oc_data"] and not throttle(API_CACHE["last_oc_fetch"],20):
+        return API_CACHE["oc_data"]
+
+    expiry=get_expiry()
+
+    r=requests.post(
+        "https://api.dhan.co/v2/optionchain",
+        headers=headers(),
+        json={
+            "UnderlyingScrip":int(cfg["id"]),
+            "UnderlyingSeg":cfg["segment"],
+            "Expiry":expiry
+        }).json()
+
+    oc=r.get("data",{}).get("oc",{})
+
+    if oc:
+        API_CACHE["oc_data"]=oc
+        API_CACHE["last_oc_fetch"]=time.time()
+        print("✅ OPTIONCHAIN REFRESH")
+
+    return API_CACHE["oc_data"]
+
+# ================= INTRADAY =================
+
+LAST_VWAP=None
+
+def get_intraday():
+
+    cfg=get_cfg()
+
+    if API_CACHE["intraday"] and not throttle(API_CACHE["last_intraday_fetch"],20):
+        return API_CACHE["intraday"]
+
+    r=requests.post(
+        "https://api.dhan.co/v2/charts/intraday",
+        headers=headers(),
+        json={
+            "securityId":cfg["id"],
+            "exchangeSegment":cfg["segment"],
+            "instrument":cfg["instrument"],
+            "interval":"1"
+        }).json()
+
+    API_CACHE["intraday"]=r.get("data",{})
+    API_CACHE["last_intraday_fetch"]=time.time()
+
+    print("✅ INTRADAY REFRESH")
+
+    return API_CACHE["intraday"]
+
+def get_vwap(ltp):
+
+    global LAST_VWAP
+
+    data=get_intraday()
+
+    prices=[]
+    volumes=[]
+
+    if "candles" in data:
+
+        for c in data["candles"]:
+            prices.append(float(c[4]))
+            volumes.append(float(c[5]))
+
+    if prices and volumes and sum(volumes)>0:
+
+        LAST_VWAP=round(sum(p*v for p,v in zip(prices,volumes))/sum(volumes),2)
+
+        return LAST_VWAP
+
+    if LAST_VWAP:
+        return LAST_VWAP
+
+    LAST_VWAP=ltp
+    return LAST_VWAP
+
+# ================= MASTER LOOP =================
+
+print("🔥 ENGINE RUNNING 🔥")
+
+while True:
+
+    try:
+
+        cells=ws.get("A1:Z50")
+
+        SHEET_CACHE.clear()
+
+        for r_idx,row in enumerate(cells):
+            for c_idx,val in enumerate(row):
+                SHEET_CACHE[f"{chr(65+c_idx)}{r_idx+1}"]=val
+
+        ltp,_=market()
+
+        ultra_write("C6",ltp)
+
+        cpr_engine(ltp)
+
+        oc=get_optionchain()
+
+        vwap_val=get_vwap(ltp)
+
+        ultra_write("Q3",vwap_val)
+
+        if WRITE_CACHE:
+
+            batch=[{"range":k,"values":[[v]]} for k,v in WRITE_CACHE.items()]
+            ws.batch_update(batch)
+            WRITE_CACHE.clear()
+
+        print(">>> LOOP OK")
+
+        time.sleep(8)
+
+    except Exception as e:
+
+        print("ERROR:",e)
+        time.sleep(8)
