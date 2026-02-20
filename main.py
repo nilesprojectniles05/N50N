@@ -1,9 +1,8 @@
-from dotenv import load_dotenv
-load_dotenv()
 import os
-print("BASE64 exists:", os.getenv("BASE64") is not None)
+import base64
+import json
+import time, datetime, math, requests
 from dhanhq import dhanhq
-import requests,time,os,json,base64,datetime,math
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -11,17 +10,21 @@ print("🔥 N50 FINAL MASTER ENGINE V5.1 ULTRA RUNNING 🔥")
 
 # ================= GOOGLE AUTH =================
 
-GOOGLE_B64=os.getenv("GOOGLE_B64")
+GOOGLE_B64 = os.getenv("BASE64")
 
-creds=Credentials.from_service_account_info(
- json.loads(base64.b64decode(GOOGLE_B64).decode()),
- scopes=[
-  "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/drive"
- ])
+if not GOOGLE_B64:
+    raise ValueError("❌ BASE64 environment variable not found")
 
-gc=gspread.authorize(creds)
-ws=gc.open("N50").sheet1
+creds = Credentials.from_service_account_info(
+    json.loads(base64.b64decode(GOOGLE_B64).decode()),
+    scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+)
+
+gc = gspread.authorize(creds)
+ws = gc.open("N50").sheet1
 # ================= ULTRA SHEET MODE =================
 SHEET_CACHE = {}
 WRITE_CACHE = {}
@@ -2627,6 +2630,7 @@ while True:
 
         print("ERROR:", e)
         time.sleep(8)
+
 
 
 
