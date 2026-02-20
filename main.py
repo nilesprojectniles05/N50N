@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
-
+import os
+print("BASE64 exists:", os.getenv("BASE64") is not None)
 from dhanhq import dhanhq
 import requests,time,os,json,base64,datetime,math
 import gspread
@@ -2626,5 +2627,6 @@ while True:
 
         print("ERROR:", e)
         time.sleep(8)
+
 
 
